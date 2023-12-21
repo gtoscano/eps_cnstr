@@ -23,9 +23,7 @@ add_definitions(-DBOOST_LOG_DYN_LINK=1)
 find_package(Boost 1.74.0 COMPONENTS thread log log_setup REQUIRED)
 find_package(PkgConfig)
 
-# Check libraries of loki: pkg-config --libs loki-cpp
 # Result: -L/usr/local/lib -lpthread -lprotobuf -lsnappy -lfmt -lcurl -lloki-cpp
-pkg_check_modules(LOKI-CPP REQUIRED IMPORTED_TARGET loki-cpp)
 pkg_check_modules(PROTOBUF REQUIRED IMPORTED_TARGET protobuf)
 pkg_check_modules(SNAPPY REQUIRED IMPORTED_TARGET snappy)
 pkg_check_modules(CURLPP REQUIRED IMPORTED_TARGET curlpp)
@@ -100,10 +98,10 @@ find_package(aws-cpp-sdk-s3 CONFIG REQUIRED)
 find_package(Protobuf MODULE REQUIRED)
 
 
-file(GLOB_RECURSE SRC_FILES src/*.cpp ../misc/src/misc2.cpp)
+file(GLOB_RECURSE SRC_FILES src/*.cpp /home/gtoscano/django/api4opt4/optimization/misc/src/misc2.cpp)
 add_executable(eps_cnstr ${SRC_FILES})
-target_include_directories(eps_cnstr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../misc/include)
-target_link_libraries(eps_cnstr PUBLIC Boost::log Boost::log_setup hiredis redis++ fmt arrow_shared parquet_shared crossguid aws-cpp-sdk-core aws-cpp-sdk-s3 SimpleAmqpClient Threads::Threads PkgConfig::LOKI-CPP PkgConfig::IPOPT PkgConfig::LIBCURL)
+target_include_directories(eps_cnstr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include /home/gtoscano/django/api4opt4/optimization/misc/include)
+target_link_libraries(eps_cnstr PUBLIC Boost::log Boost::log_setup hiredis redis++ fmt arrow_shared parquet_shared crossguid aws-cpp-sdk-core aws-cpp-sdk-s3 SimpleAmqpClient Threads::Threads PkgConfig::IPOPT PkgConfig::LIBCURL)
 #PkgConfig::PROTOBUF PkgConfig::SNAPPY)
 
 install(TARGETS eps_cnstr RUNTIME DESTINATION /usr/local/bin)

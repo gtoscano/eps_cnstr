@@ -5,7 +5,6 @@
 //[MAIN]
 #include "IpIpoptApplication.hpp"
 #include "nlp.hpp"
-#include "misc.hpp"
 #include <fstream>
 #include <iostream>
 #include <chrono>
@@ -14,46 +13,34 @@
 #include <string>
 #include <fmt/core.h>
 #include <coin-or/IpSmartPtr.hpp>
+#include <unordered_map>
+#include <memory>
+#include <misc_utilities.h>
 
 using namespace Ipopt;
 
 extern int nvars;
 extern int ncons;
 
-/*
-std::string getEnvVar( std::string const & key ) 
-{
-    char * val = std::getenv( key.c_str() );
-    return val == NULL ? std::string("") : std::string(val);
-}
- */
 // https://dev.to/zigabrencic/parameters-object-in-c-1an9
 class Parameters {
 public:
-    std::string uuid;
+    std::string filename_in;
+    std::string filename_out;
     double max_constr;
     int pollutant_idx;
-    int limit_alpha;
-    int cnstr_eval;
     std::string log_filename;
     Parameters() {
-        uuid;
-        max_constr;
-        pollutant_idx;
-        limit_alpha;
-        cnstr_eval;
-        log_filename;
     }
 };
 
 class EpsConstraint {
     // https://pdimov.github.io/blog/2020/09/07/named-parameters-in-c20/
     struct Params {
-        std::string uuid;
+        std::string filename_in;
+        std::string filename_out;
         double max_constr;
         int pollutant_idx;
-        int limit_alpha;
-        int cnstr_eval;
         std::string log_filename;
     };
     //SmartPtr <TNLP> mynlp;
@@ -68,25 +55,29 @@ public:
     void get_final_x(std::vector<double> &final_x);
     void set_init_x(std::vector<double> &init_x);
 };
+
 void EpsConstraint::get_final_x(std::vector<double> &final_x) {
     final_x.resize(mynlp->final_x.size());
     std::copy(mynlp->final_x.begin(), mynlp->final_x.end(), final_x.begin());
 }
+
 void EpsConstraint::set_init_x(std::vector<double> &init_x) {
     mynlp->init_x.resize(init_x.size());
     std::copy(init_x.begin(), init_x.end(), mynlp->init_x.begin());
 }
+
 EpsConstraint::EpsConstraint(const std::shared_ptr<Parameters> &var) {
-    std::string uuid = var->uuid;
+    std::string filename_in = var->filename_in;
+    std::string filename_out = var->filename_out;
     double max_constr = var->max_constr;
     int pollutant_idx = var->pollutant_idx;
-    int limit_alpha = var->limit_alpha;
-    int cnstr_eval = var->cnstr_eval;
     log_filename = var->log_filename;
 
-    mynlp = new EPA_NLP(uuid, max_constr, pollutant_idx, limit_alpha, cnstr_eval);
+
+    mynlp = new EPA_NLP(filename_in, filename_out, max_constr, pollutant_idx);
     app = IpoptApplicationFactory();
 }
+
 bool EpsConstraint::evaluate(double reduction) {
     //app->Options()->SetNumericValue("tol", 1e-8);
 
@@ -122,33 +113,27 @@ int main(
         int argc,
         char **argv
 ) {
-    //        1                                 2  3 4 5   6  7
-    //run be2e77b4-da21-4d4d-ba3f-bf88bae73618 0.3 0 1 1.0 4 10
-    // 61 0.9 0 0 1.0 4
+    //        1             2           3  4  5   6
+    //run Jefferson.json   output.json  0 0.9 1.0 5 
 
-    std::string msu_cbpo_path = getEnvVar("MSU_CBPO_PATH", "/opt/opt4cast");
-    std::string uuid;
-    std::string fileName = fmt::format("{}/output/nsga3/{}/config/output.txt", msu_cbpo_path, uuid);
-    //fileName = fmt::format("{}/output.txt", msu_cbpo_path, uuid);
-    uuid = argv[1]; // 63
-    double max_constr = atof(argv[2]); // 0.9
+    std::string filename_in;
+    std::string filename_out;
+    filename_in = argv[1];
+    filename_out = argv[2];
     int pollutant_idx = atoi(argv[3]); // 0
-    double limit_alpha = atof(argv[5]); // 1.0
-    int cnstr_eval = 0; //0
-    int cost_profile_idx = atoi(argv[6]);
-    int nsteps = atoi(argv[7]);
+    double max_constr = atof(argv[4]); // 0.9
+    int nsteps = atoi(argv[5]); //5
 
-    read_global_files(argv[1], pollutant_idx, cost_profile_idx);
     auto var = std::make_shared<Parameters>();
-    std::string ipopt_output_file = fmt::format("{}/output/nsga3/{}/config/ipopt.out", msu_cbpo_path, uuid);
-    var->log_filename = ipopt_output_file;
-    var->limit_alpha = limit_alpha;
-    var->cnstr_eval = cnstr_eval;
+    std::string log_filename = fmt::format("{}_ipopt.out", filename_out);
+    var->filename_in = filename_in;
+    var->filename_out = filename_out;
+    var->log_filename = log_filename;
     var->max_constr = max_constr;
     var->pollutant_idx = pollutant_idx;
-    var->uuid = uuid;
 
-    if (atoi(argv[4]) == 0) { //ipopt Opt3
+    int option = 0;
+    if (option == 0) { //ipopt Opt3
         EpsConstraint eps_constr(var);
         auto r = eps_constr.evaluate(var->max_constr);
         /*
@@ -162,12 +147,12 @@ int main(
         std::cout<<r<<std::endl;
         */
     }
-    if (atoi(argv[4]) == 1) { //ipopt Opt3
+    if (option == 1) { //ipopt Opt3
         EpsConstraint eps_constr(var);
         eps_constr.constr_eval(var->max_constr, nsteps);
     }
-    if (atoi(argv[4]) == 6) { //ipopt Opt3
-        SmartPtr <TNLP> mynlp = new EPA_NLP(argv[1], max_constr, pollutant_idx, limit_alpha, cnstr_eval);
+    if (option == 6) { //ipopt Opt3
+        SmartPtr <TNLP> mynlp = new EPA_NLP(filename_in, filename_out, max_constr, pollutant_idx);
         SmartPtr <IpoptApplication> app = IpoptApplicationFactory();
 
         //app->Options()->SetNumericValue("tol", 1e-8);
@@ -175,9 +160,7 @@ int main(
         app->Options()->SetStringValue("linear_solver", "ma57");
 
         //app->Options()->SetStringValue("mu_strategy", "adaptive");
-        std::string ipopt_output_file = fmt::format("{}/output/nsga3/{}/config/ipopt.out", msu_cbpo_path, uuid);
-        //std::string ipopt_output_file = fmt::format("{}/ipopt.out", msu_cbpo_path, uuid);
-        app->Options()->SetStringValue("output_file", ipopt_output_file.c_str());
+        app->Options()->SetStringValue("output_file", log_filename.c_str());
         app->Options()->SetStringValue("hessian_approximation", "limited-memory");
 
         ApplicationReturnStatus status;
@@ -189,7 +172,7 @@ int main(
 
         // Ask Ipopt to solve the problem
         status = app->OptimizeTNLP(mynlp);
-        std::ofstream file(fileName, std::ios_base::app);
+        std::ofstream file(log_filename, std::ios_base::app);
 
         if (status == Solve_Succeeded) {
             std::cout << std::endl << std::endl << "*** The problem solved!" << std::endl;
@@ -200,8 +183,8 @@ int main(
         }
         file.close();
 
-    } else if (atoi(argv[4]) == 2) { //random Opt1
-        EPA_NLP *mynlp = new EPA_NLP(argv[1], max_constr, pollutant_idx, 1.0, cnstr_eval);
+    } else if (option == 2) { //random Opt1
+        EPA_NLP *mynlp = new EPA_NLP(filename_in, filename_out, max_constr, pollutant_idx);
         Index n;
         Index m;
         mynlp->get_n_and_m(n, m);
@@ -220,7 +203,7 @@ int main(
         mynlp->eval_f(n, x, true, obj_value);
         mynlp->write_files(n, x, m, obj_value);
 
-        std::ofstream file(fileName, std::ios_base::app);
+        std::ofstream file(log_filename, std::ios_base::app);
 
         file << "Random Test\n";
         file.close();
