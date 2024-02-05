@@ -21,22 +21,15 @@ class EPA_NLP: public TNLP
 
 public:
     double max_constr;
-    double limit_alpha;
-    double total_capital;
     double total_cost;
     double total_acres;
-    int cnstr_eval;
     int status_result;
     int pollutant_idx;
-    std::vector<double> init_x;
-    std::vector<double> final_x;
     bool has_content;
-
-   std::string msu_cbpo_path;
    /** Default constructor */
 
-   EPA_NLP(std::string filename_in, std::string filename_out, double max_constr, int pollutant_id);
-    void update_reduction(double);
+   EPA_NLP(std::string filename_in, std::string filename_scenario ,std::string filename_out, double max_constr, int pollutant_id);
+   void update_reduction(double,int);
    /** Default destructor */
    virtual ~EPA_NLP();
 
@@ -51,26 +44,26 @@ public:
       IndexStyleEnum& index_style
    );
     
-bool random_x(
-   Index&          n,
-   Index&          m,
-   Number* x
-);
+    bool random_x( Index& n, Index& m, Number* x);
 
 
-void write_files(
+    void write_files(
         Index                      n,
-   const Number*              x,
-   Index                      m,
-   Number                     obj_value
-   );
+        const Number*              x,
+        Index                      m,
+        Number                     obj_value
+        );
 
-void save_files(
+    void save_files(
         Index                      n,
         const Number*              x
-);
+    );
 
-void write_formar_cast_file();
+    void save_files2(
+        Index                      n,
+        const Number*              x
+    );
+
 
    /** Method to return the bounds for my problem */
    virtual bool get_bounds_info(
@@ -98,11 +91,11 @@ void write_formar_cast_file();
       Index   m,
       bool    init_lambda,
       Number* lambda
-   );
-bool get_n_and_m(
-   Index&          n,
-   Index&          m
-);
+    );
+    bool get_n_and_m(
+       Index&          n,
+       Index&          m
+    );
 
    /** Method to return the objective value */
    virtual bool eval_f(
@@ -214,7 +207,7 @@ private:
     void normalize_efficiency();
     int compute_ef();
     void compute_eta();
-    void load(const std::string& filename);
+    void load(const std::string& filename, const std::string& filename_scenario);
 
     size_t ef_size_;
 
@@ -226,16 +219,15 @@ private:
 
     std::string filename_in;
     std::string filename_out;
+    std::string filename_scenario;
     std::vector<std::string> ef_keys_;
-    std::vector<double> x;
 
     std::unordered_map<std::string, double> amount_;
     std::unordered_map<std::string, std::vector<std::vector<int>>> efficiency_;
     //a partir de aqui hay que revisar
     std::unordered_map<std::string, std::vector<int>> lrseg_;
     std::unordered_map<std::string, std::vector<double>> eta_dict_;
-    std::unordered_map<std::string, std::vector<double>> phi_dict_;//gtp not yet
-    int load_to_opt_; //gtp?
+    std::unordered_map<std::string, std::vector<double>> phi_dict_;
     std::unordered_map<std::string, double> bmp_cost_;
     std::unordered_map<std::string, int> u_u_group_dict;
     std::vector<double> initial_x;
@@ -244,6 +236,14 @@ private:
     std::unordered_map<int, std::vector<double>> limit_bmps_dict;
     std::unordered_map<int, std::vector<double> > limit_alpha_dict;
     std::unordered_map<int, std::vector<int> > limit_vars_dict;
+
+    std::vector<std::tuple<int, int, int, int, double, int, int, int, int>> ef_x_;
+
+    int write_land(
+        const std::vector<std::tuple<int, int, int, int, double, int, int, int, int>>& lc_x,
+        const std::string& out_filename
+    ); 
+    int current_iteration_;
    //@}
 };
 

@@ -19,6 +19,29 @@
 #include <boost/algorithm/string.hpp>
 #include <misc_utilities.h>
 
+
+#include <parquet/arrow/reader.h>
+#include <parquet/arrow/writer.h>
+#include <parquet/exception.h>
+#include <parquet/stream_writer.h>
+
+#include <arrow/api.h>
+#include <arrow/io/file.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/reader.h>
+#include <arrow/status.h>
+#include <arrow/type.h>
+
+#include <arrow/api.h>
+#include <arrow/io/api.h>
+#include <arrow/csv/api.h>
+#include <arrow/csv/writer.h>
+#include <arrow/ipc/api.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
+#include <arrow/table.h>
+#include <arrow/compute/api_aggregate.h>
+
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -87,20 +110,25 @@ void from_json(const json &j, var_t &p) {
 }
 
 // constructor 63 0.9 0 1 0
-EPA_NLP::EPA_NLP(std::string filename_in, std::string filename_out, double max_constr, int pollutant_id) {
+EPA_NLP::EPA_NLP(std::string filename_in, std::string filename_scenario, std::string filename_out, double max_constr, int pollutant_id) {
     this->filename_in = filename_in;
-    load(filename_in);
+    this->filename_scenario = filename_scenario;
     this->filename_out = filename_out;
+    fmt::print("{} {} {}\n", filename_in, filename_scenario, filename_out);
+    load(filename_in, filename_scenario);
     this-> pollutant_idx = pollutant_id;
     this->total_cost = 1.0;
     this->total_acres = 1.0;
     //read_global_files(prefix_file, pollutant_id);
-    update_reduction(max_constr);
+    current_iteration_ = 0;
+    update_reduction(max_constr, current_iteration_);
     fmt::print("Max constr: {}, {}\n", this->max_constr, max_constr);
     has_content = false;
 }
 
-void EPA_NLP::update_reduction(double max_constr) {
+
+void EPA_NLP::update_reduction(double max_constr, int current_iteration) {
+    current_iteration_ = current_iteration;
     this->max_constr = (1.0 - max_constr) * sum_load_valid_[pollutant_idx];
 }
 
@@ -119,10 +147,9 @@ bool EPA_NLP::get_nlp_info(
     m = ncons_;
 
     int tmp_limit_bmp_counter = 0;
-    /*
-    for (auto const&[key, val]: limit_bmps_dict)
+    for (auto const&[key, val]: limit_bmps_dict) {
         tmp_limit_bmp_counter += limit_vars_dict[key].size();
-        */
+    }
 
     nnz_jac_g = nvars_ * 2 + tmp_limit_bmp_counter;
     nnz_h_lag = (int) (nvars_ * (nvars_ + 1)) / 2.0;
@@ -133,7 +160,7 @@ bool EPA_NLP::get_nlp_info(
 
 
 
-// EFICCIENCY BEGIN
+// EFICIENCY BEGIN
 void EPA_NLP::compute_ef_keys() {
 
     for (const auto& pair : efficiency_) {
@@ -165,7 +192,6 @@ void EPA_NLP::filter_ef_keys() {
             continue;
         }
         auto alpha = amount_[key];
-        auto phi = phi_dict_[key];
         
         if (alpha <= 1.0){
             keys_to_remove.push_back(key);
@@ -211,20 +237,15 @@ void EPA_NLP::compute_ef_size() {
     nvars_ = 0;
     ncons_ = 1;
 
-    int counter = 0;
-
     for (const auto &key: ef_keys_) {
         auto& bmp_groups =  efficiency_[key];
         for (const auto &bmp_group : bmp_groups) {
             for (const auto &bmp : bmp_group) {
-                ++counter;
                 ++nvars_;
             }
             ++ncons_;
         }
     }
-
-    ef_size_ = counter;
 }
 
 
@@ -235,11 +256,11 @@ void EPA_NLP::compute_eta() {
         auto& bmp_groups =  efficiency_[key];
         std::vector <std::string> out;
         misc_utilities::split_str(key, '_', out);
-        auto s = out[0];
-        auto u = out[2];
+        auto lrseg = out[0];
+        auto load_src = out[2];
         for (const auto &bmp_group: bmp_groups) {
             for (const auto &bmp: bmp_group) {
-                std::string s_tmp = fmt::format("{}_{}_{}", bmp, s, u);
+                std::string s_tmp = fmt::format("{}_{}_{}", bmp, lrseg, load_src);
 
 	        	std::vector<std::string> eta_tmp;
                 std::string eta_str = "0.0_0.0_0.0";
@@ -261,19 +282,49 @@ void EPA_NLP::compute_eta() {
     }
 }
 
-void EPA_NLP::load(const std::string& filename) {
+std::vector<double> compute_loads(std::vector<std::string>& parcel_keys, std::unordered_map<std::string, std::vector<double>>& phi_dict, std::unordered_map<std::string, double>& amount) {
+    double n_eos_sum = 0.0;
+    double p_eos_sum = 0.0;
+    double s_eos_sum = 0.0;
+    double n_eor_sum = 0.0;
+    double p_eor_sum = 0.0;
+    double s_eor_sum = 0.0;
+    double n_eot_sum = 0.0;
+    double p_eot_sum = 0.0;
+    double s_eot_sum = 0.0;
+
+    for (const auto &key: parcel_keys) {
+        auto phi = phi_dict[key];
+        n_eos_sum += phi[0] * amount[key];
+        p_eos_sum += phi[1] * amount[key];
+        s_eos_sum += phi[2] * amount[key];
+        n_eor_sum += phi[3] * amount[key];
+        p_eor_sum += phi[4] * amount[key];
+        s_eor_sum += phi[5] * amount[key];
+        n_eot_sum += phi[6] * amount[key];
+        p_eot_sum += phi[7] * amount[key];
+        s_eot_sum += phi[8] * amount[key];
+    }
+    std::vector<double> ret = {n_eos_sum, p_eos_sum, s_eos_sum,
+                               n_eor_sum, p_eor_sum, s_eor_sum,
+                               n_eot_sum, p_eot_sum, s_eot_sum};
+    return ret;
+}
+
+void EPA_NLP::load(const std::string& filename, const std::string& filename_scenario) {
 
     // Open the JSON file
     std::ifstream file(filename);
     if (!file.is_open()) {
-        std::cerr << "Failed to open the file." << std::endl;
+        std::cerr << "Failed to open the base scenario file: " << filename<<std::endl;
         exit(-1);
         return;
     }
 
+
     // Parse the JSON file directly into a nlohmann::json object
     json json_obj = json::parse(file);
-    std::vector<std::string> keys_to_check = {"amount", "phi", "efficiency", "lrseg", "bmp_cost", "u_u_group", "sum_load_valid", "sum_load_invalid" };
+    std::vector<std::string> keys_to_check = {"amount", "phi", "efficiency", "lrseg", "bmp_cost", "u_u_group", "sum_load_valid", "sum_load_invalid", "ef_bmps",  };
     for (const auto& key : keys_to_check) {
         if (!json_obj.contains(key)) {
             std::cout << "The JSON object does not contain the key '" << key << "'\n";
@@ -281,30 +332,90 @@ void EPA_NLP::load(const std::string& filename) {
         }
     }
 
+    std::ifstream file_scenario(filename_scenario);
+    if (!file_scenario.is_open()) {
+        std::cerr << "Failed to open the scenario file: " << filename_scenario<<std::endl;
+        exit(-1);
+        return;
+    }
+    // Parse the JSON file_scenario directly into a nlohmann::json object
+    json json_obj_scenario = json::parse(file_scenario);
+    std::vector<std::string> keys_to_check_scenario = {"selected_bmps", "bmp_cost", "selected_reduction_target", "sel_pollutant", "target_pct"};
+    for (const auto& key : keys_to_check_scenario) {
+        if (!json_obj_scenario.contains(key)) {
+            std::cout << "The JSON object of the scenario file does not contain key '" << key << "'\n";
+            exit(-1);
+        }
+    }
+    std::vector<int> selected_bmps = json_obj_scenario["selected_bmps"].get<std::vector<int>>();
+    std::unordered_map<std::string, double> updated_bmp_cost = json_obj_scenario["bmp_cost"].get<std::unordered_map<std::string, double>>();
+
+
     // Access the JSON data
     amount_ = json_obj["amount"].get<std::unordered_map<std::string, double>>();
     phi_dict_ = json_obj["phi"].get<std::unordered_map<std::string, std::vector<double>>>();
     efficiency_ = json_obj["efficiency"].get<std::unordered_map<std::string, std::vector<std::vector<int>>>>();
-    /*
-    auto efficiency_tmp = json_obj["efficiency"].get<std::unordered_map<std::string, std::vector<std::string>>>();
-    for (const auto& [key, value] : efficiency_tmp) {
-        std::vector<std::string> bmp_group;
-        for (const auto& bmp_load_src : value) {
-            std::vector<std::string> bmp_split;
-            misc_utilities::split_str(bmp_load_src, '_', bmp_split);
-            // if bmp_split[0] is in valid_lc_bmps, then add it to the bmp_group
-            if(std::ranges::find(valid_lc_bmps_, bmp_split[0]) != valid_lc_bmps_.end()) {
-                bmp_group.push_back(bmp_load_src);
+    
+    std::unordered_map<std::string, std::vector<double>> phi_dict = json_obj["phi"].get<std::unordered_map<std::string, std::vector<double>>>();
+
+    std::unordered_map<std::string, std::vector<std::vector<int>>> filtered_efficiency;
+    std::vector<std::string> filtered_valid_ef_keys;
+    for (const auto&[key, val]: efficiency_) {
+        std::vector<std::vector<int>> filtered_bmps;
+        for (const auto& bmp_group: val) {
+            std::vector<int> filtered_bmps_group;
+            for (const auto& bmp: bmp_group) {
+                if (std::find(selected_bmps.begin(), selected_bmps.end(), bmp) != selected_bmps.end()) {
+                    filtered_bmps_group.push_back(bmp);
+                }
+            }
+            if (!filtered_bmps_group.empty()) {
+                filtered_bmps.push_back(filtered_bmps_group);
             }
         }
-        if (bmp_group.size() > 0) {
-            efficiency_[key] = bmp_group;
+        if (!filtered_bmps.empty()) {
+            filtered_efficiency[key] = filtered_bmps;
+            filtered_valid_ef_keys.push_back(key);
         }
+    }
 
+    std::vector<std::string> filtered_invalid_ef_keys;
+    for (const auto&[key, val]: efficiency_) {
+        if (std::find(filtered_valid_ef_keys.begin(), filtered_valid_ef_keys.end(), key) == filtered_valid_ef_keys.end()) {
+            filtered_invalid_ef_keys.push_back(key);
+        }
+    }
+    efficiency_ = filtered_efficiency; 
+
+
+    auto sum_load_valid = compute_loads(filtered_valid_ef_keys, phi_dict, amount_);
+    auto sum_load_invalid = compute_loads(filtered_invalid_ef_keys, phi_dict, amount_);
+
+
+    //print filtered_efficiency
+    /*
+    for (const auto&[key, val]: filtered_efficiency) {
+        std::cout << key << " : ";
+        for (const auto& bmp_group: val) {
+            std::cout << "[";
+            for (const auto& bmp: bmp_group) {
+                std::cout << bmp << ", ";
+            }
+            std::cout << "], ";
+        }
+        std::cout << std::endl;
     }
     */
-    
+
     bmp_cost_ = json_obj["bmp_cost"].get<std::unordered_map<std::string, double>>();
+    // replace bmp_cost with updated_bmp_cost 
+    for (const auto&[key, val]: updated_bmp_cost) {
+        if (bmp_cost_.find(key) != bmp_cost_.end()) {
+            bmp_cost_[key] = updated_bmp_cost[key];
+
+        }
+    }
+
     lrseg_ = json_obj["lrseg"].get<std::unordered_map<std::string, std::vector<int>>>();
 
 
@@ -313,6 +424,9 @@ void EPA_NLP::load(const std::string& filename) {
 
     sum_load_valid_ = json_obj["sum_load_valid"].get<std::vector<double>>();
     sum_load_invalid_ = json_obj["sum_load_invalid"].get<std::vector<double>>();
+    sum_load_valid_ = sum_load_valid;
+    sum_load_invalid_ = sum_load_invalid;
+
     compute_ef_keys();
     filter_ef_keys();
     compute_ef_size();
@@ -908,10 +1022,6 @@ void EPA_NLP::save_files(
     ofile.precision(10);
     var_t v;
 
-    final_x.resize(n);
-    for(int i(0); i<n; ++i) {
-       final_x[i] = x[i];
-    }
 
     int idx = 0;
     int parcel_idx = 0;
@@ -957,6 +1067,149 @@ void EPA_NLP::save_files(
     ofile.close();
 }
 
+int EPA_NLP::write_land(
+        const std::vector<std::tuple<int, int, int, int, double, int, int, int, int>>& lc_x,
+        const std::string& out_filename
+) {
+    if (lc_x.size() == 0) {
+        return 0;
+    }
+
+    std::shared_ptr<arrow::Schema> schema = arrow::schema ({
+                                                                   arrow::field("BmpSubmittedId", arrow::int32()),
+                                                                   arrow::field("AgencyId", arrow::int32()),
+                                                                   arrow::field("StateUniqueIdentifier", arrow::utf8()), //it can be binary
+                                                                   arrow::field("StateId", arrow::int32()),
+                                                                   arrow::field("BmpId", arrow::int32()),
+                                                                   arrow::field("GeographyId", arrow::int32()),
+                                                                   arrow::field("LoadSourceGroupId", arrow::int32()),
+                                                                   arrow::field("UnitId", arrow::int32()),
+                                                                   arrow::field("Amount", arrow::float64()),
+                                                                   arrow::field("IsValid", arrow::boolean()),
+                                                                   arrow::field("ErrorMessage", arrow::utf8()),//it can be binary
+                                                                   arrow::field("RowIndex", arrow::int32()),
+                                                           });
+    std::unordered_map<int, double> bmp_sum;
+    arrow::Int32Builder bmp_submitted_id, agency_id;
+    arrow::StringBuilder state_unique_identifier;
+    arrow::Int32Builder state_id, bmp_id, geography_id, load_source_id, unit_id_builder;
+    arrow::DoubleBuilder amount_builder;
+    arrow::BooleanBuilder is_valid;
+    arrow::StringBuilder error_message;
+    arrow::Int32Builder row_index;
+
+
+    std::shared_ptr<arrow::io::FileOutputStream> outfile;
+
+
+    PARQUET_ASSIGN_OR_THROW(
+            outfile,
+            arrow::io::FileOutputStream::Open(out_filename));
+
+    parquet::WriterProperties::Builder builder;
+    //builder.compression(parquet::Compression::ZSTD);
+    builder.version(parquet::ParquetVersion::PARQUET_1_0);
+
+    std::shared_ptr<parquet::schema::GroupNode> my_schema;
+
+    parquet::schema::NodeVector fields;
+
+
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "BmpSubmittedId", parquet::Repetition::REQUIRED, parquet::Type::INT32, parquet::ConvertedType::INT_32
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "AgencyId", parquet::Repetition::REQUIRED, parquet::Type::INT32, parquet::ConvertedType::INT_32
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "StateUniqueIdentifier", parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY, parquet::ConvertedType::UTF8
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "StateId", parquet::Repetition::REQUIRED, parquet::Type::INT32, parquet::ConvertedType::INT_32
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "BmpId", parquet::Repetition::REQUIRED, parquet::Type::INT32, parquet::ConvertedType::INT_32
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "GeographyId", parquet::Repetition::REQUIRED, parquet::Type::INT32, parquet::ConvertedType::INT_32
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "LoadSourceGroupId", parquet::Repetition::REQUIRED, parquet::Type::INT32, parquet::ConvertedType::INT_32
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "UnitId", parquet::Repetition::REQUIRED, parquet::Type::INT32, parquet::ConvertedType::INT_32
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "Amount", parquet::Repetition::REQUIRED, parquet::Type::DOUBLE
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "IsValid", parquet::Repetition::REQUIRED, parquet::Type::BOOLEAN
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "ErrorMessage", parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY, parquet::ConvertedType::UTF8
+    ));
+    fields.push_back(parquet::schema::PrimitiveNode::Make(
+            "RowIndex", parquet::Repetition::REQUIRED, parquet::Type::INT32, parquet::ConvertedType::INT_32
+    ));
+
+    my_schema = std::static_pointer_cast<parquet::schema::GroupNode>(
+            parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED, fields));
+
+    parquet::StreamWriter os{
+            parquet::ParquetFileWriter::Open(outfile, my_schema, builder.build())};
+
+
+    int idx = 0;
+    int counter = 0;
+    for (const auto& entry : lc_x) {
+        auto [lrseg, agency, load_src, bmp, amount, load_src_grp, geography, state, unit] = entry;
+        os<<counter+1<<agency<<fmt::format("SU{}",counter)<<state<<bmp<<geography<<load_src_grp<<unit<<amount<<true<<""<<counter+1<<parquet::EndRow;
+        counter++;
+    }
+
+    return counter;
+}
+
+void EPA_NLP::save_files2(
+        Index                      n,
+        const Number *x
+) {
+
+    int idx = 0;
+    int parcel_idx = 0;
+    // Iterate through each line and split the content using delimeter
+    bool flag = false;
+    ef_x_.clear();
+
+    for (const auto &key: ef_keys_) {
+        std::vector <std::string> out;
+        misc_utilities::split_str(key, '_', out);
+        auto lrseg = out[0];
+        auto agency = out[1];
+        auto load_src = out[2];
+        auto state_id = lrseg_.at(lrseg)[1];
+        auto alpha = amount_[key];
+        auto& bmp_groups =  efficiency_[key];
+        auto unit_id = 1;
+        for (const auto &bmp_group : bmp_groups) {
+            for (const auto &bmp : bmp_group) {
+                if (x[idx] * alpha > 1.0) {
+                    double amount = x[idx];
+
+                    int state = lrseg_.at(lrseg)[1];
+                    int geography = lrseg_.at(lrseg)[2];
+                    int unit = 1;
+                    int load_src_grp = u_u_group_dict[load_src];
+                std::tuple<int, int, int, int, double, int, int, int, int> newTuple(std::stoi(lrseg), std::stoi(agency), std::stoi(load_src), bmp, amount, load_src_grp, geography, state, unit);
+                    ef_x_.push_back(newTuple);
+                }
+                ++idx;
+            }
+        }
+    }
+
+}
+
 void EPA_NLP::write_files(
         Index n,
         const Number *x,
@@ -976,13 +1229,10 @@ void EPA_NLP::write_files(
     std::cout << std::endl << "Final value of the constraints:" << std::endl;
 
 
-    std::string file_name = fmt::format("{}.csv", filename_out);
-    std::ofstream file(file_name);
+    std::string filename = fmt::format("{}_{}.csv", filename_out, current_iteration_);
+    std::ofstream file(filename);
     file.precision(15);
 
-    file_name = fmt::format("{}_results.txt", filename_out);
-    std::ofstream file2(file_name);
-    file2.precision(15);
     std::cout << "g_constr[NLoadEos] = " << g_constr[0] + sum_load_invalid_[0] << "\n";
     std::cout << "g_constr[PLoadEos] = " << g_constr[1] + sum_load_invalid_[1] << "\n";
     std::cout << "g_constr[SLoadEos] = " << g_constr[2] + sum_load_invalid_[2] << "\n";
@@ -990,10 +1240,15 @@ void EPA_NLP::write_files(
     std::cout << "Original PLoadEos = " << sum_load_valid_[1] + sum_load_invalid_[1] << "\n";
     std::cout << "Original SLoadEos = " << sum_load_valid_[2] + sum_load_invalid_[2] << "\n";
 
-    file2 << obj_value << "," << g_constr[0] + sum_load_invalid_[0] << "," << g_constr[1] + sum_load_invalid_[1] << ","
+    filename = fmt::format("{}_results.txt", filename_out);
+    std::ofstream file_results(filename, std::ios::app);
+    file_results.precision(15);
+
+    file_results << obj_value << "," << g_constr[0] + sum_load_invalid_[0] << "," << g_constr[1] + sum_load_invalid_[1] << ","
           << g_constr[2] + sum_load_invalid_[2] << "," << sum_load_valid_[0] + sum_load_invalid_[0] << ","
           << sum_load_valid_[1] + sum_load_invalid_[1] << "," << sum_load_valid_[2] + sum_load_invalid_[2] << "\n";
-    file2.close();
+    file_results.close();
+    
     // Iterate through each line and split the content using delimeter
     int idx = 0;
 
@@ -1036,9 +1291,9 @@ void EPA_NLP::write_files(
         }
     }
 
-    file_name = fmt::format("{}_summary.txt", filename_out);
+    filename = fmt::format("{}_summary.txt", filename_out);
 
-    std::ofstream file3(file_name);
+    std::ofstream file3(filename);
 
     file3.precision(10);
     file3 << "Bmp_id,Acres,Cost" << std::endl;
@@ -1071,16 +1326,19 @@ void EPA_NLP::finalize_solution(
         const IpoptData *ip_data,
         IpoptCalculatedQuantities *ip_cq
 ) {
-    final_x.resize(n);
     status_result= (int) status;
     std::cout<<"Status: "<<status<<std::endl;
-
-    for (size_t i = 0; i < n; i++)
-    {
-        final_x[i] = x[i];
-    }
     
     write_files(n, x, m, obj_value);
     save_files(n, x);
-    // write_formar_cast_file();
+    save_files2(n, x);
+
+    std::string out_filename = fmt::format("{}_{}_land.parquet", filename_out, current_iteration_);
+    fmt::print("Writing land file: {}\n", out_filename);
+    
+    write_land(
+        ef_x_,
+        out_filename
+    );
 }
+
