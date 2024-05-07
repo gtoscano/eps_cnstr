@@ -5,15 +5,9 @@ This project implements a hybrid optimization strategy for the Chesapeake Bay wa
 
 ## Description
 The $\epsilon$-constraint method modifies the original single-objective problem into a series of single-objective problems by adjusting the constraint on the second objective function, $f_2$. This is done to produce a series of solutions that contribute to forming a Pareto front. The method is defined by the following optimization formulation:
-$$
-\begin{equation}
-    \begin{array}{rl}
-    \text{Minimize} & f_1(\mathbf{x}), \\
-    \text{Subject to} & f_2(\mathbf{x}) \leq \epsilon_k f_2^{\text{base}}, \\
-     \mathbf{x} \in \mathbf{X},
-    \end{array}
-    \label{eq:biased}
-\end{equation}
+Minimize $f_1(\mathbf{x})$, 
+Subject to  $f_2(\mathbf{x}) \leq \epsilon_k f_2^{\text{base}},$
+     $\mathbf{x} \in \mathbf{X},$
 $$
 
 where $f_2^{\text{base}}$ is the baseline nitrogen loading and $\mathbf{X}$ represents the feasible set of decision variables. The method involves multiple executions for different values of $\epsilon_k$, ranging from 1.0 to 0.70 in decreasing steps of 0.03, to achieve a comprehensive set of solutions.
